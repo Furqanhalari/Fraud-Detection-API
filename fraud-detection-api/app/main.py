@@ -11,6 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.core.config import settings
+from app.core.database import check_db_connection
 from app.core.limiter import limiter
 from app.core.logger import get_logger
 from app.core.security import install_ip_mask_filter
@@ -44,19 +45,26 @@ async def lifespan(app: FastAPI):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Fraud Detection API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Fraud Detection API",
+    version="0.1.0",
+    lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+)
 
 # Set safe defaults — lifespan overwrites ensemble after startup completes
 app.state.ensemble = None
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # Configurable via ALLOWED_ORIGINS env var (comma-separated).
-# Defaults to localhost dev ports; override in production with real domain(s).
+# Defaults to localhost dev ports; set to your production domain(s) in Replit Secrets.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
-    allow_credentials=False,          # no cookies / credentials across origins
-    allow_methods=["GET", "POST"],    # only the verbs this API uses
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
 
@@ -114,7 +122,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 @app.get("/api/health")
 def health(request: Request):
+    """
+    Public health-check endpoint. Safe to use as a Replit deployment probe.
+
+    Returns:
+      status       — always "ok" when the server is reachable
+      models_loaded — true once train.py has been run and models are on disk
+      db_connected  — true if the database responded to SELECT 1
+      timestamp     — Unix epoch seconds (UTC)
+    """
     return {
         "status": "ok",
         "models_loaded": request.app.state.ensemble is not None,
+        "db_connected": check_db_connection(),
+        "timestamp": time.time(),
     }

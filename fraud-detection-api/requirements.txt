@@ -1,23 +1,29 @@
-# Web framework
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
 
-# Templating
-jinja2==3.1.4
+# ── Templating ────────────────────────────────────────────────────────────────
+jinja2==3.1.6
+aiofiles==25.1.0
 
-# Database
-sqlalchemy==2.0.30
-alembic==1.13.1
+# ── Database ──────────────────────────────────────────────────────────────────
+sqlalchemy==2.0.49
+alembic==1.18.4
 
-# ML
-scikit-learn==1.4.2
-xgboost==2.0.3
-imbalanced-learn==0.12.2
-numpy==1.26.4
-pandas==2.2.2
-joblib==1.4.2
+# ── ML ────────────────────────────────────────────────────────────────────────
+scikit-learn==1.8.0
+xgboost==3.2.0
+imbalanced-learn==0.14.1
+numpy==2.4.4
+pandas==3.0.2
+joblib==1.5.3
 
-# Config / validation
-pydantic==2.7.1
-pydantic-settings==2.2.1
-python-dotenv==1.0.1
+# ── Config / validation ───────────────────────────────────────────────────────
+pydantic==2.13.3
+python-dotenv==1.2.2
+
+# ── Security / rate limiting ──────────────────────────────────────────────────
+slowapi==0.1.9
+
+# ── HTTP client ───────────────────────────────────────────────────────────────
+httpx==0.28.1
