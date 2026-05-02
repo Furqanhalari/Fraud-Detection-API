@@ -2,13 +2,14 @@
 POST /api/v1/predict — Real-time fraud prediction endpoint.
 
 Pipeline:
-  1. Rate-limit check (100 req/min per IP)
-  2. Validate & sanitize input
-  3. Duplicate transaction_id check (409)
-  4. Feature engineering
-  5. Ensemble inference
-  6. Persist to DB
-  7. Return structured response
+  1. Rate-limit check (100 req/min per IP via SlowAPIMiddleware)
+  2. Validate & sanitize input (Pydantic + model_validator)
+  3. Check models are loaded (503 if startup failed)
+  4. Duplicate transaction_id check (409)
+  5. Feature engineering
+  6. Ensemble inference via request.app.state.ensemble (loaded at startup)
+  7. Persist to DB
+  8. Return structured response
 """
 
 import time
@@ -18,14 +19,12 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.limiter import limiter
 from app.core.logger import get_logger
-from app.ml.ensemble import get_ensemble
 from app.ml.features import engineer_features
 from app.models.db_models import Transaction
 from app.models.schemas import PredictRequest, PredictResponse
@@ -69,10 +68,23 @@ def _build_feature_row(req: PredictRequest) -> pd.DataFrame:
 def predict(request: Request, req: PredictRequest, db: Session = Depends(get_db)) -> PredictResponse:
     t_start = time.monotonic()
 
+    # ── 0. Check models loaded at startup ─────────────────────────────────────
+    ensemble = getattr(request.app.state, "ensemble", None)
+    if ensemble is None:
+        logger.error("[predict] Ensemble is None — models did not load at startup")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_structured_error(
+                "model_unavailable",
+                "ML models are not loaded. Run train.py to generate model files and restart the server.",
+                "app.state.ensemble is None",
+            ),
+        )
+
     # ── 1. Duplicate check ────────────────────────────────────────────────────
     try:
         existing = (
-            db.query(Transaction)
+            db.query(Transaction.id)
             .filter(Transaction.transaction_id == req.transaction_id)
             .first()
         )
@@ -80,11 +92,7 @@ def predict(request: Request, req: PredictRequest, db: Session = Depends(get_db)
         logger.error("[predict] DB duplicate check failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_structured_error(
-                "db_error",
-                "Database error during duplicate check.",
-                str(exc),
-            ),
+            detail=_structured_error("db_error", "Database error during duplicate check.", str(exc)),
         )
 
     if existing:
@@ -134,39 +142,20 @@ def predict(request: Request, req: PredictRequest, db: Session = Depends(get_db)
             ),
         )
 
-    # ── 3. Ensemble inference ─────────────────────────────────────────────────
+    # ── 3. Ensemble inference (uses startup-loaded model from app.state) ───────
     try:
-        ensemble = get_ensemble()
         result = ensemble.predict(feature_vector)
-    except FileNotFoundError as exc:
-        logger.error("[predict] Model artifact missing: %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=_structured_error(
-                "model_unavailable",
-                "Model artifact (.pkl) not found. Run train.py to train and save models.",
-                str(exc),
-            ),
-        )
     except RuntimeError as exc:
         logger.error("[predict] Ensemble runtime error: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=_structured_error(
-                "model_unavailable",
-                "Ensemble model is not loaded.",
-                str(exc),
-            ),
+            detail=_structured_error("model_unavailable", "Ensemble model is not loaded.", str(exc)),
         )
     except Exception as exc:
         logger.error("[predict] Ensemble inference failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_structured_error(
-                "inference_error",
-                "Unexpected error during model inference.",
-                str(exc),
-            ),
+            detail=_structured_error("inference_error", "Unexpected error during model inference.", str(exc)),
         )
 
     processing_ms = int((time.monotonic() - t_start) * 1000)
@@ -215,10 +204,7 @@ def predict(request: Request, req: PredictRequest, db: Session = Depends(get_db)
 
     logger.info(
         "[predict] txn=%s fraud_score=%.4f is_fraud=%s ms=%d",
-        req.transaction_id,
-        result["fraud_score"],
-        result["is_fraud"],
-        processing_ms,
+        req.transaction_id, result["fraud_score"], result["is_fraud"], processing_ms,
     )
 
     return PredictResponse(

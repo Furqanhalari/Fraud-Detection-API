@@ -1,4 +1,6 @@
 import os
+import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -9,15 +11,37 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from app.core.limiter import limiter
 from app.core.logger import get_logger
-from app.api.routes.prediction import router as prediction_router
-from app.api.routes.backtest import router as backtest_router
-from app.api.routes.monitoring import router as monitoring_router
-from app.api.routes.dashboard import router as dashboard_router
+from app.ml.ensemble import FraudEnsemble
 
 logger = get_logger(__name__)
 
-app = FastAPI(title="Fraud Detection API", version="0.1.0")
 
+# ── Lifespan: load models ONCE at startup ─────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    t0 = time.monotonic()
+    try:
+        ensemble = FraudEnsemble()
+        ensemble.load_models()
+        app.state.ensemble = ensemble
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info("Models loaded at startup in %.1f ms", elapsed_ms)
+    except FileNotFoundError as exc:
+        logger.warning("Models not found at startup — predict will return 503: %s", exc)
+        app.state.ensemble = None
+
+    yield  # application runs here
+
+    logger.info("Application shutting down")
+
+
+# ── App ───────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="Fraud Detection API", version="0.1.0", lifespan=lifespan)
+
+# Set safe defaults — lifespan overwrites these after startup completes
+app.state.ensemble = None
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -28,6 +52,11 @@ os.makedirs(_STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 # ── Routers ───────────────────────────────────────────────────────────────────
+from app.api.routes.prediction import router as prediction_router
+from app.api.routes.backtest import router as backtest_router
+from app.api.routes.monitoring import router as monitoring_router
+from app.api.routes.dashboard import router as dashboard_router
+
 app.include_router(prediction_router)
 app.include_router(backtest_router)
 app.include_router(monitoring_router)
@@ -38,20 +67,11 @@ app.include_router(dashboard_router)
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
-    """
-    Reformat all HTTPException details into the canonical error envelope:
-      {"error": "...", "message": "...", "detail": "..."}
-    If the handler already raised with a dict detail, pass it through unchanged.
-    """
     detail = exc.detail
     if isinstance(detail, dict) and "error" in detail:
         content = detail
     else:
-        content = {
-            "error": "http_error",
-            "message": str(detail),
-            "detail": "",
-        }
+        content = {"error": "http_error", "message": str(detail), "detail": ""}
     return JSONResponse(status_code=exc.status_code, content=content)
 
 
@@ -71,5 +91,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
-def health():
-    return {"status": "ok"}
+def health(request: Request):
+    return {
+        "status": "ok",
+        "models_loaded": request.app.state.ensemble is not None,
+    }

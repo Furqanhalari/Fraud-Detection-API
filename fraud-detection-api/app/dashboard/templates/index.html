@@ -21,6 +21,8 @@
     --text:    #e2e8f0;
     --subtext: #94a3b8;
     --radius:  10px;
+    --skel-base:      #1f2233;
+    --skel-highlight: #2a2d3a;
   }
 
   body {
@@ -40,11 +42,7 @@
     border-bottom: 1px solid var(--border);
     background: var(--surface);
   }
-  header h1 {
-    font-size: 18px;
-    font-weight: 600;
-    letter-spacing: -0.3px;
-  }
+  header h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
   header h1 span { color: var(--blue); }
   .header-meta {
     display: flex;
@@ -104,6 +102,7 @@
     letter-spacing: -1px;
     color: var(--text);
     line-height: 1;
+    min-height: 32px;
   }
   .card-value.highlight { color: var(--blue); }
   .card-sub {
@@ -152,11 +151,7 @@
   .table-panel .panel-title { margin-bottom: 4px; }
   .table-panel .panel-sub   { margin-bottom: 18px; }
 
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th {
     text-align: left;
     font-size: 11px;
@@ -185,21 +180,86 @@
   .badge-stable { background: rgba(34,197,94,.15);  color: var(--green);  }
   .badge-watch  { background: rgba(245,158,11,.15); color: var(--yellow); }
   .badge-drift  { background: rgba(239,68,68,.15);  color: var(--red);    }
-
   .sparkline-cell { width: 90px; }
 
-  /* ── Loading / empty ── */
-  .loading {
-    color: var(--muted);
-    font-size: 12px;
-    text-align: center;
-    padding: 20px;
+  /* ── Text fallback ── */
+  .loading { color: var(--muted); font-size: 12px; text-align: center; padding: 20px; }
+  .no-data { color: var(--muted); font-size: 12px; font-style: italic; }
+
+  /* ────────────────────────────────────────────────────────────────────────
+     SKELETON LOADING SYSTEM
+     Gray animated shimmer shown while Chart.js fetches data from the API.
+     Each panel has its own skeleton structure that matches its final layout.
+  ──────────────────────────────────────────────────────────────────────── */
+
+  @keyframes shimmer {
+    0%   { background-position: -600px 0; }
+    100% { background-position:  600px 0; }
   }
-  .no-data {
-    color: var(--muted);
-    font-size: 12px;
-    font-style: italic;
+
+  .skel {
+    background: linear-gradient(
+      90deg,
+      var(--skel-base)      25%,
+      var(--skel-highlight) 50%,
+      var(--skel-base)      75%
+    );
+    background-size: 600px 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+    border-radius: 5px;
   }
+
+  /* Card skeletons */
+  .skel-card-value {
+    height: 32px;
+    width: 70%;
+    margin-bottom: 8px;
+  }
+  .skel-card-sub {
+    height: 11px;
+    width: 55%;
+  }
+
+  /* Chart skeleton — fills the chart-wrap area */
+  .skel-chart {
+    position: absolute;
+    inset: 0;
+    border-radius: 6px;
+    display: flex;
+    align-items: flex-end;
+    gap: 5px;
+    padding: 12px 8px 0;
+    overflow: hidden;
+  }
+  /* Animated bars that mimic a bar/line chart placeholder */
+  .skel-chart::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      var(--skel-base)      25%,
+      var(--skel-highlight) 50%,
+      var(--skel-base)      75%
+    );
+    background-size: 600px 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+    border-radius: 6px;
+  }
+
+  /* Drift table skeleton rows */
+  .skel-table { width: 100%; border-collapse: collapse; }
+  .skel-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .skel-table tr:last-child td { border-bottom: none; }
+  .skel-row-feature { height: 12px; width: 70px; }
+  .skel-row-psi     { height: 12px; width: 40px; }
+  .skel-row-spark   { height: 12px; width: 80px; }
+  .skel-row-badge   { height: 18px; width: 48px; border-radius: 99px; }
+
+  /* Hide real content while skeleton is visible */
+  .panel-loading canvas  { opacity: 0; }
+  .card-loading .card-value,
+  .card-loading .card-sub { opacity: 0; }
 </style>
 </head>
 <body>
@@ -215,59 +275,75 @@
 
 <main>
 
-  <!-- Panel 1: Live metric cards -->
+  <!-- Panel 1: Live metric cards (skeleton shown until summary loads) -->
   <div class="cards">
-    <div class="card">
+    <div class="card card-loading" id="card-total">
       <div class="card-label">Transactions Today</div>
-      <div class="card-value" id="m-total">—</div>
-      <div class="card-sub">since midnight UTC</div>
+      <div class="card-value skel skel-card-value" id="m-total"></div>
+      <div class="card-sub skel skel-card-sub" id="sub-total"></div>
     </div>
-    <div class="card">
+    <div class="card card-loading" id="card-fraud-rate">
       <div class="card-label">Fraud Rate Today</div>
-      <div class="card-value" id="m-fraud-rate">—</div>
-      <div class="card-sub">of scored transactions</div>
+      <div class="card-value skel skel-card-value" id="m-fraud-rate"></div>
+      <div class="card-sub skel skel-card-sub" id="sub-fraud-rate"></div>
     </div>
-    <div class="card">
+    <div class="card card-loading" id="card-avg-score">
       <div class="card-label">Avg Fraud Score</div>
-      <div class="card-value" id="m-avg-score">—</div>
-      <div class="card-sub">ensemble output (0–1)</div>
+      <div class="card-value skel skel-card-value" id="m-avg-score"></div>
+      <div class="card-sub skel skel-card-sub" id="sub-avg-score"></div>
     </div>
-    <div class="card">
+    <div class="card card-loading" id="card-model">
       <div class="card-label">Active Model</div>
-      <div class="card-value highlight" id="m-model" style="font-size:20px;line-height:1.4">—</div>
-      <div class="card-sub" id="m-threshold">threshold —</div>
+      <div class="card-value highlight skel skel-card-value" id="m-model" style="font-size:20px;line-height:1.4"></div>
+      <div class="card-sub skel skel-card-sub" id="m-threshold"></div>
     </div>
   </div>
 
-  <!-- Panel 2 + 4: Charts row -->
+  <!-- Panel 2 + 4: Charts row (chart-wrap gets skeleton overlay until data loads) -->
   <div class="charts-row">
 
     <!-- Panel 2: Precision / Recall -->
-    <div class="panel">
+    <div class="panel panel-loading" id="panel-pr">
       <div class="panel-title">Precision &amp; Recall vs Threshold</div>
       <div class="panel-sub">Latest backtest run — active threshold shown as dashed line</div>
       <div class="chart-wrap">
+        <div class="skel-chart" id="skel-pr"></div>
         <canvas id="pr-chart"></canvas>
       </div>
     </div>
 
     <!-- Panel 4: Transaction volume -->
-    <div class="panel">
+    <div class="panel panel-loading" id="panel-vol">
       <div class="panel-title">Transaction Volume — Last 24 Hours</div>
       <div class="panel-sub">Fraud vs legitimate, by hour (UTC)</div>
       <div class="chart-wrap">
+        <div class="skel-chart" id="skel-vol"></div>
         <canvas id="vol-chart"></canvas>
       </div>
     </div>
 
   </div>
 
-  <!-- Panel 3: Feature drift table -->
+  <!-- Panel 3: Feature drift table (skeleton rows until drift-history loads) -->
   <div class="table-panel">
     <div class="panel-title">Feature Drift Monitor</div>
     <div class="panel-sub">PSI over last 7 days — flags drift when PSI &gt; 0.2</div>
     <div id="drift-table-wrap">
-      <div class="loading">Loading drift data…</div>
+      <table class="skel-table" id="skel-drift-table">
+        <thead>
+          <tr>
+            <th>Feature</th><th>Latest PSI</th><th>7-day Trend</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- 5 placeholder rows -->
+          <tr><td><div class="skel skel-row-feature"></div></td><td><div class="skel skel-row-psi"></div></td><td><div class="skel skel-row-spark"></div></td><td><div class="skel skel-row-badge"></div></td></tr>
+          <tr><td><div class="skel skel-row-feature"></div></td><td><div class="skel skel-row-psi"></div></td><td><div class="skel skel-row-spark"></div></td><td><div class="skel skel-row-badge"></div></td></tr>
+          <tr><td><div class="skel skel-row-feature"></div></td><td><div class="skel skel-row-psi"></div></td><td><div class="skel skel-row-spark"></div></td><td><div class="skel skel-row-badge"></div></td></tr>
+          <tr><td><div class="skel skel-row-feature"></div></td><td><div class="skel skel-row-psi"></div></td><td><div class="skel skel-row-spark"></div></td><td><div class="skel skel-row-badge"></div></td></tr>
+          <tr><td><div class="skel skel-row-feature"></div></td><td><div class="skel skel-row-psi"></div></td><td><div class="skel skel-row-spark"></div></td><td><div class="skel skel-row-badge"></div></td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -287,6 +363,29 @@ const GRAY  = 'rgba(107,114,128,0.55)';
 
 let prChart  = null;
 let volChart = null;
+
+// ── Skeleton helpers ──────────────────────────────────────────────────────
+
+function removeSkel(id) {
+  const el = document.getElementById(id);
+  if (el) el.remove();
+}
+
+function cardReady(cardId, valueEl, subText) {
+  const card = document.getElementById(cardId);
+  const val  = document.getElementById(valueEl);
+  const sub  = document.getElementById('sub-' + valueEl.replace('m-', ''));
+  if (card) card.classList.remove('card-loading');
+  if (val)  { val.classList.remove('skel', 'skel-card-value'); val.style.opacity = ''; }
+  if (sub)  { sub.classList.remove('skel', 'skel-card-sub');  sub.style.opacity = ''; }
+  if (sub && subText) sub.textContent = subText;
+}
+
+function panelReady(panelId, skelId) {
+  const panel = document.getElementById(panelId);
+  if (panel) panel.classList.remove('panel-loading');
+  removeSkel(skelId);
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -316,8 +415,8 @@ function sparklineSVG(values) {
 }
 
 function statusBadge(psi) {
-  if (psi > 0.2)  return `<span class="badge badge-drift">Drift</span>`;
-  if (psi > 0.1)  return `<span class="badge badge-watch">Watch</span>`;
+  if (psi > 0.2) return `<span class="badge badge-drift">Drift</span>`;
+  if (psi > 0.1) return `<span class="badge badge-watch">Watch</span>`;
   return `<span class="badge badge-stable">Stable</span>`;
 }
 
@@ -335,8 +434,16 @@ async function fetchJSON(url) {
 
 async function loadSummary() {
   const data = await fetchJSON('/api/v1/monitoring/summary');
+
+  // Always remove skeletons, even on failure
+  cardReady('card-total',      'm-total',      'since midnight UTC');
+  cardReady('card-fraud-rate', 'm-fraud-rate', 'of scored transactions');
+  cardReady('card-avg-score',  'm-avg-score',  'ensemble output (0–1)');
+  cardReady('card-model',      'm-model',      null);
+
   if (!data) return;
-  document.getElementById('m-total').textContent     = data.total_transactions_today ?? '0';
+
+  document.getElementById('m-total').textContent      = data.total_transactions_today ?? '0';
   document.getElementById('m-fraud-rate').textContent = fmt(data.fraud_rate_today, 2) + '%';
   document.getElementById('m-avg-score').textContent  = fmt(data.avg_fraud_score_today, 4);
   document.getElementById('m-model').textContent      = data.active_model_version || 'None';
@@ -346,14 +453,17 @@ async function loadSummary() {
 // ── Panel 2: Precision / Recall chart ────────────────────────────────────
 
 async function loadPRChart() {
-  const data = await fetchJSON('/api/v1/backtest/history');
-  const summaryData = await fetchJSON('/api/v1/monitoring/summary');
+  const [data, summaryData] = await Promise.all([
+    fetchJSON('/api/v1/backtest/history'),
+    fetchJSON('/api/v1/monitoring/summary'),
+  ]);
   const activeThreshold = summaryData?.threshold_used ?? 0.5;
+
+  panelReady('panel-pr', 'skel-pr');
 
   const canvas = document.getElementById('pr-chart');
   const ctx = canvas.getContext('2d');
 
-  // Flatten all backtest records and find latest run_at
   let allRows = [];
   if (data?.groups) {
     for (const rows of Object.values(data.groups)) allRows = allRows.concat(rows);
@@ -367,7 +477,6 @@ async function loadPRChart() {
     return;
   }
 
-  // Pick the most recent run_at group
   allRows.sort((a, b) => new Date(b.run_at ?? b.created_at) - new Date(a.run_at ?? a.created_at));
   const latestRunAt = allRows[0].run_at ?? allRows[0].created_at;
   const latestRows = allRows
@@ -380,7 +489,6 @@ async function loadPRChart() {
 
   if (prChart) prChart.destroy();
 
-  // Vertical annotation line for active threshold
   const thresholdPlugin = {
     id: 'thresholdLine',
     afterDraw(chart) {
@@ -411,32 +519,12 @@ async function loadPRChart() {
     data: {
       labels: thresholds.map(t => t.toFixed(2)),
       datasets: [
-        {
-          label: 'Precision',
-          data: precisions,
-          borderColor: BLUE,
-          backgroundColor: 'rgba(55,138,221,0.08)',
-          pointBackgroundColor: BLUE,
-          tension: 0.35,
-          fill: false,
-          pointRadius: 4,
-        },
-        {
-          label: 'Recall',
-          data: recalls,
-          borderColor: CORAL,
-          backgroundColor: 'rgba(216,90,48,0.08)',
-          pointBackgroundColor: CORAL,
-          tension: 0.35,
-          fill: false,
-          pointRadius: 4,
-        },
+        { label: 'Precision', data: precisions, borderColor: BLUE,  backgroundColor: 'rgba(55,138,221,0.08)', pointBackgroundColor: BLUE,  tension: 0.35, fill: false, pointRadius: 4 },
+        { label: 'Recall',    data: recalls,    borderColor: CORAL, backgroundColor: 'rgba(216,90,48,0.08)',  pointBackgroundColor: CORAL, tension: 0.35, fill: false, pointRadius: 4 },
       ],
     },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: 400 },
+      responsive: true, maintainAspectRatio: false, animation: { duration: 400 },
       scales: {
         x: { grid: { color: '#1f2233' }, title: { display: true, text: 'Threshold', color: '#6b7280' } },
         y: { min: 0, max: 1, grid: { color: '#1f2233' }, title: { display: true, text: 'Score', color: '#6b7280' } },
@@ -453,13 +541,15 @@ async function loadPRChart() {
 
 async function loadVolumeChart() {
   const data = await fetchJSON('/api/v1/monitoring/volume');
-  const ctx = document.getElementById('vol-chart').getContext('2d');
+
+  panelReady('panel-vol', 'skel-vol');
 
   if (!data) return;
 
-  const labels       = data.hours.map(h => String(h).padStart(2,'0') + ':00');
-  const fraudCounts  = data.fraud_counts;
-  const legitCounts  = data.legit_counts;
+  const ctx = document.getElementById('vol-chart').getContext('2d');
+  const labels      = data.hours.map(h => String(h).padStart(2,'0') + ':00');
+  const fraudCounts = data.fraud_counts;
+  const legitCounts = data.legit_counts;
 
   if (volChart) volChart.destroy();
 
@@ -468,25 +558,15 @@ async function loadVolumeChart() {
     data: {
       labels,
       datasets: [
-        { label: 'Fraud',      data: fraudCounts,  backgroundColor: RED,  stack: 'vol' },
-        { label: 'Legitimate', data: legitCounts,  backgroundColor: GRAY, stack: 'vol' },
+        { label: 'Fraud',      data: fraudCounts, backgroundColor: RED,  stack: 'vol' },
+        { label: 'Legitimate', data: legitCounts, backgroundColor: GRAY, stack: 'vol' },
       ],
     },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: 400 },
+      responsive: true, maintainAspectRatio: false, animation: { duration: 400 },
       scales: {
-        x: {
-          stacked: true,
-          grid: { display: false },
-          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 },
-        },
-        y: {
-          stacked: true,
-          grid: { color: '#1f2233' },
-          ticks: { precision: 0 },
-        },
+        x: { stacked: true, grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+        y: { stacked: true, grid: { color: '#1f2233' }, ticks: { precision: 0 } },
       },
       plugins: {
         legend: { labels: { usePointStyle: true, pointStyle: 'rect', padding: 16 } },
@@ -508,7 +588,6 @@ async function loadDriftTable() {
   }
 
   const features = data.features;
-
   const rows = features.map(f => {
     const latestPSI = f.psi_scores.length ? f.psi_scores[f.psi_scores.length - 1] : 0;
     return `<tr>

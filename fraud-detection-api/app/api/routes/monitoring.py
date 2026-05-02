@@ -3,15 +3,16 @@ POST /api/v1/monitoring/drift-snapshot  — Trigger a drift snapshot for the act
 GET  /api/v1/monitoring/drift-history   — PSI history grouped by feature.
 GET  /api/v1/monitoring/summary         — Live today metrics for the dashboard.
 GET  /api/v1/monitoring/volume          — Hourly transaction counts (last 24 h).
+
+All GET routes return Cache-Control: max-age=60.
 """
 
 from collections import defaultdict
-from datetime import datetime, timedelta, date, time as dt_time
-from typing import List, Optional
+from datetime import datetime, timedelta, time as dt_time
+from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -23,11 +24,27 @@ from app.monitoring.drift import run_drift_snapshot
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/monitoring", tags=["monitoring"])
 
+_CACHE_HEADER = "max-age=60, stale-while-revalidate=30"
 
-# ── Shared helper ─────────────────────────────────────────────────────────────
+
+# ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _structured_error(error: str, message: str, detail: str = "") -> dict:
     return {"error": error, "message": message, "detail": detail}
+
+
+def _resolve_active_model_version(db: Session) -> str:
+    mv = db.query(ModelVersion.id).filter(ModelVersion.is_active == True).first()
+    if mv:
+        return str(mv.id)
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=_structured_error(
+            "no_active_model",
+            "No active model version found in the database.",
+            "Run train.py to train a model and register a ModelVersion first.",
+        ),
+    )
 
 
 # ── Pydantic response schemas ─────────────────────────────────────────────────
@@ -67,22 +84,6 @@ class VolumeResponse(BaseModel):
     hours: List[int]
     fraud_counts: List[int]
     legit_counts: List[int]
-
-
-# ── Internal helpers ──────────────────────────────────────────────────────────
-
-def _resolve_active_model_version(db: Session) -> str:
-    mv = db.query(ModelVersion).filter(ModelVersion.is_active == True).first()
-    if mv:
-        return str(mv.id)
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=_structured_error(
-            "no_active_model",
-            "No active model version found in the database.",
-            "Run train.py to train a model and register a ModelVersion first.",
-        ),
-    )
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -129,8 +130,8 @@ def trigger_drift_snapshot(db: Session = Depends(get_db)) -> DriftSnapshotRespon
     logger.info(
         "[drift_snapshot] model=%s features=%d drifted=%d",
         model_version_id,
-        summary.get("features_evaluated", 0),
-        summary.get("drifted_features", 0),
+        summary.get("features_checked", 0),
+        summary.get("features_flagged", 0),
     )
     return DriftSnapshotResponse(model_version_id=model_version_id, **summary)
 
@@ -139,21 +140,25 @@ def trigger_drift_snapshot(db: Session = Depends(get_db)) -> DriftSnapshotRespon
     "/drift-history",
     response_model=DriftHistoryResponse,
     status_code=status.HTTP_200_OK,
-    responses={
-        500: {"model": dict, "description": "Database error"},
-    },
+    responses={500: {"model": dict, "description": "Database error"}},
 )
 def drift_history(
+    response: Response,
     days: int = Query(default=30, ge=1, le=365, description="Look-back window in days"),
     db: Session = Depends(get_db),
 ) -> DriftHistoryResponse:
-    """
-    Return drift_snapshots rows for the last N days, grouped by feature_name.
-    """
+    """Return drift_snapshots rows for the last N days, grouped by feature_name."""
+    response.headers["Cache-Control"] = _CACHE_HEADER
+
     try:
         cutoff = datetime.utcnow() - timedelta(days=days)
         rows = (
-            db.query(DriftSnapshot)
+            db.query(
+                DriftSnapshot.feature_name,
+                DriftSnapshot.snapshot_date,
+                DriftSnapshot.psi_score,
+                DriftSnapshot.drift_flagged,
+            )
             .filter(DriftSnapshot.created_at >= cutoff)
             .order_by(DriftSnapshot.feature_name, DriftSnapshot.snapshot_date)
             .all()
@@ -162,14 +167,10 @@ def drift_history(
         logger.error("[drift_history] DB query failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_structured_error(
-                "db_error",
-                "Failed to load drift history from the database.",
-                str(exc),
-            ),
+            detail=_structured_error("db_error", "Failed to load drift history from the database.", str(exc)),
         )
 
-    by_feature: dict[str, list[DriftSnapshot]] = defaultdict(list)
+    by_feature: dict[str, list] = defaultdict(list)
     for row in rows:
         by_feature[row.feature_name].append(row)
 
@@ -191,16 +192,20 @@ def drift_history(
     "/summary",
     response_model=SummaryResponse,
     status_code=status.HTTP_200_OK,
-    responses={
-        500: {"model": dict, "description": "Database error"},
-    },
+    responses={500: {"model": dict, "description": "Database error"}},
 )
-def summary(db: Session = Depends(get_db)) -> SummaryResponse:
+def summary(response: Response, db: Session = Depends(get_db)) -> SummaryResponse:
     """Live today metrics for the dashboard cards."""
+    response.headers["Cache-Control"] = _CACHE_HEADER
+
     try:
         today_start = datetime.combine(datetime.utcnow().date(), dt_time.min)
-        today_txns = (
-            db.query(Transaction)
+        # Select only the columns we actually aggregate — avoids loading raw_features JSON
+        rows = (
+            db.query(
+                Transaction.is_fraud_predicted,
+                Transaction.fraud_score,
+            )
             .filter(Transaction.created_at >= today_start)
             .all()
         )
@@ -208,22 +213,16 @@ def summary(db: Session = Depends(get_db)) -> SummaryResponse:
         logger.error("[summary] DB query failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_structured_error(
-                "db_error",
-                "Failed to load today's transactions from the database.",
-                str(exc),
-            ),
+            detail=_structured_error("db_error", "Failed to load today's transactions from the database.", str(exc)),
         )
 
-    total = len(today_txns)
-    fraud_count = sum(1 for t in today_txns if t.is_fraud_predicted)
+    total = len(rows)
+    fraud_count = sum(1 for r in rows if r.is_fraud_predicted)
     fraud_rate = (fraud_count / total * 100) if total > 0 else 0.0
-    avg_score = (
-        sum(t.fraud_score or 0.0 for t in today_txns) / total if total > 0 else 0.0
-    )
+    avg_score = (sum(r.fraud_score or 0.0 for r in rows) / total) if total > 0 else 0.0
 
     try:
-        mv = db.query(ModelVersion).filter(ModelVersion.is_active == True).first()
+        mv = db.query(ModelVersion.version_tag).filter(ModelVersion.is_active == True).first()
         version_tag = mv.version_tag if mv else "none"
     except Exception as exc:
         logger.warning("[summary] Could not resolve active model version: %s", exc)
@@ -242,16 +241,17 @@ def summary(db: Session = Depends(get_db)) -> SummaryResponse:
     "/volume",
     response_model=VolumeResponse,
     status_code=status.HTTP_200_OK,
-    responses={
-        500: {"model": dict, "description": "Database error"},
-    },
+    responses={500: {"model": dict, "description": "Database error"}},
 )
-def volume(db: Session = Depends(get_db)) -> VolumeResponse:
+def volume(response: Response, db: Session = Depends(get_db)) -> VolumeResponse:
     """Hourly transaction counts (fraud vs legit) for the last 24 hours."""
+    response.headers["Cache-Control"] = _CACHE_HEADER
+
     try:
         cutoff = datetime.utcnow() - timedelta(hours=24)
+        # Select only the two columns needed — avoids loading raw_features JSON
         rows = (
-            db.query(Transaction)
+            db.query(Transaction.created_at, Transaction.is_fraud_predicted)
             .filter(Transaction.created_at >= cutoff)
             .all()
         )
@@ -259,19 +259,14 @@ def volume(db: Session = Depends(get_db)) -> VolumeResponse:
         logger.error("[volume] DB query failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_structured_error(
-                "db_error",
-                "Failed to load transaction volume data from the database.",
-                str(exc),
-            ),
+            detail=_structured_error("db_error", "Failed to load transaction volume data from the database.", str(exc)),
         )
 
     fraud_by_hour: dict[int, int] = defaultdict(int)
     legit_by_hour: dict[int, int] = defaultdict(int)
-
-    for t in rows:
-        h = t.created_at.hour
-        if t.is_fraud_predicted:
+    for r in rows:
+        h = r.created_at.hour
+        if r.is_fraud_predicted:
             fraud_by_hour[h] += 1
         else:
             legit_by_hour[h] += 1

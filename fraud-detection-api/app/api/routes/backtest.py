@@ -1,6 +1,6 @@
 """
-POST /api/v1/backtest  — Threshold sweep evaluation over labelled transactions.
-GET  /api/v1/backtest/history — All past backtest_runs rows grouped by dataset_label.
+POST /api/v1/backtest         — Threshold sweep evaluation over labelled transactions.
+GET  /api/v1/backtest/history — Paginated past backtest runs grouped by dataset_label.
 """
 
 import uuid
@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Optional
 
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, model_validator
 from sklearn.metrics import f1_score, precision_score, recall_score
 from sqlalchemy.orm import Session
@@ -78,15 +78,19 @@ class BacktestRunRecord(BaseModel):
 
 class BacktestHistoryResponse(BaseModel):
     groups: dict[str, List[BacktestRunRecord]]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _get_or_create_model_version(db: Session) -> str:
-    mv = db.query(ModelVersion).filter(ModelVersion.is_active == True).first()
+    mv = db.query(ModelVersion.id).filter(ModelVersion.is_active == True).first()
     if mv:
         return str(mv.id)
-    mv = db.query(ModelVersion).order_by(ModelVersion.created_at.desc()).first()
+    mv = db.query(ModelVersion.id).order_by(ModelVersion.created_at.desc()).first()
     if mv:
         return str(mv.id)
     placeholder = ModelVersion(
@@ -141,10 +145,10 @@ def _compute_threshold_metrics(
     },
 )
 def run_backtest(req: BacktestRequest, db: Session = Depends(get_db)) -> BacktestResponse:
-    # ── 1. Load labelled transactions ──────────────────────────────────────────
+    # ── 1. Load labelled transactions (select only needed columns) ─────────────
     try:
         rows = (
-            db.query(Transaction)
+            db.query(Transaction.is_fraud_actual, Transaction.fraud_score)
             .filter(Transaction.is_fraud_actual.isnot(None))
             .filter(Transaction.fraud_score.isnot(None))
             .all()
@@ -153,11 +157,7 @@ def run_backtest(req: BacktestRequest, db: Session = Depends(get_db)) -> Backtes
         logger.error("[backtest] DB query failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_structured_error(
-                "db_error",
-                "Failed to load transactions from the database.",
-                str(exc),
-            ),
+            detail=_structured_error("db_error", "Failed to load transactions from the database.", str(exc)),
         )
 
     if not rows:
@@ -196,11 +196,7 @@ def run_backtest(req: BacktestRequest, db: Session = Depends(get_db)) -> Backtes
         logger.error("[backtest] Model version resolution failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_structured_error(
-                "db_error",
-                "Could not resolve or create a model version record.",
-                str(exc),
-            ),
+            detail=_structured_error("db_error", "Could not resolve or create a model version record.", str(exc)),
         )
 
     # ── 3. Threshold sweep ─────────────────────────────────────────────────────
@@ -236,11 +232,7 @@ def run_backtest(req: BacktestRequest, db: Session = Depends(get_db)) -> Backtes
         logger.error("[backtest] Threshold sweep failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_structured_error(
-                "evaluation_error",
-                "Error during threshold sweep computation.",
-                str(exc),
-            ),
+            detail=_structured_error("evaluation_error", "Error during threshold sweep computation.", str(exc)),
         )
 
     if not results:
@@ -271,27 +263,47 @@ def run_backtest(req: BacktestRequest, db: Session = Depends(get_db)) -> Backtes
     response_model=BacktestHistoryResponse,
     status_code=status.HTTP_200_OK,
     responses={
+        400: {"model": dict, "description": "Invalid pagination parameters"},
         500: {"model": dict, "description": "Database error"},
     },
 )
-def backtest_history(db: Session = Depends(get_db)) -> BacktestHistoryResponse:
-    """Return all past backtest_runs rows grouped by dataset_label."""
+def backtest_history(
+    page: int = Query(default=1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(default=50, ge=1, le=200, description="Records per page (max 200)"),
+    db: Session = Depends(get_db),
+) -> BacktestHistoryResponse:
+    """Return past backtest_runs rows grouped by dataset_label, paginated."""
     try:
+        total = db.query(BacktestRun.id).count()
+
         rows = (
-            db.query(BacktestRun)
+            db.query(
+                BacktestRun.id,
+                BacktestRun.model_version_id,
+                BacktestRun.threshold,
+                BacktestRun.precision,
+                BacktestRun.recall,
+                BacktestRun.f1,
+                BacktestRun.false_positive_rate,
+                BacktestRun.true_positive_rate,
+                BacktestRun.dataset_label,
+                BacktestRun.run_at,
+                BacktestRun.created_at,
+            )
             .order_by(BacktestRun.dataset_label, BacktestRun.run_at, BacktestRun.threshold)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
             .all()
         )
     except Exception as exc:
         logger.error("[backtest_history] DB query failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=_structured_error(
-                "db_error",
-                "Failed to load backtest history from the database.",
-                str(exc),
-            ),
+            detail=_structured_error("db_error", "Failed to load backtest history from the database.", str(exc)),
         )
+
+    import math
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
 
     groups: dict[str, List[BacktestRunRecord]] = defaultdict(list)
     for r in rows:
@@ -311,4 +323,10 @@ def backtest_history(db: Session = Depends(get_db)) -> BacktestHistoryResponse:
             )
         )
 
-    return BacktestHistoryResponse(groups=dict(groups))
+    return BacktestHistoryResponse(
+        groups=dict(groups),
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
