@@ -1,0 +1,95 @@
+Add the ground-truth labeling endpoint and wire it into the backtest pipeline.
+
+BACKEND (POST /api/v1/transactions/{transaction_id}/label):
+- Requires X-API-Key header (same auth as all POST routes)
+- Path param: transaction_id (the external string ID, not the UUID primary key)
+- Input JSON:
+  {
+    "is_fraud": boolean,
+    "label_source": "chargeback" | "investigation" | "manual" | "synthetic",
+    "notes": string (optional, max 500 chars)
+  }
+- Logic:
+  1. Look up transaction by transaction_id field (not id)
+  2. Return 404 if not found: {"error": "not_found", "transaction_id": "..."}
+  3. Update: is_fraud_actual = is_fraud
+  4. Also add label_source and label_notes columns to transactions table
+     (create Alembic migration for these two new columns)
+  5. Log: logger.info(f"[label] {transaction_id} labeled as fraud={is_fraud} source={label_source}")
+  6. Return the updated transaction row
+- Output on success:
+  {
+    "transaction_id": string,
+    "is_fraud_actual": boolean,
+    "is_fraud_predicted": boolean,
+    "fraud_score": float,
+    "label_source": string,
+    "was_correct": boolean,        ← is_fraud_actual == is_fraud_predicted
+    "labeled_at": ISO timestamp
+  }
+- Output on error: {"error": "type", "message": "..."}
+
+BACKEND (POST /api/v1/transactions/bulk-label):
+- Same auth requirement
+- Input JSON:
+  {
+    "labels": [
+      {
+        "transaction_id": string,
+        "is_fraud": boolean,
+        "label_source": "chargeback"|"investigation"|"manual"|"synthetic"
+      }
+    ]
+  }
+- Max 500 labels per request. Return 400 if exceeded.
+- Logic: process each label, collect results, continue on individual failures
+- Output:
+  {
+    "processed": number,
+    "succeeded": number,
+    "failed": number,
+    "failures": [{"transaction_id": string, "reason": string}],
+    "accuracy_snapshot": {
+      "correct_predictions": number,
+      "total_labeled": number,
+      "accuracy": float
+    }
+  }
+
+BACKEND (GET /api/v1/transactions/{transaction_id}):
+- Returns single transaction row with all fields including is_fraud_actual if set
+- Returns 404 if not found
+- Use case: callers can check the current label before overwriting
+
+UPDATE POST /api/v1/backtest:
+- No input changes needed
+- Update the docstring/comment to clarify: 
+  "Requires transactions with is_fraud_actual populated via the label endpoint"
+- Add to the 400 error response when no labeled transactions exist:
+  {
+    "error": "no_labeled_data",
+    "message": "No transactions with ground truth labels found. Use POST /api/v1/transactions/{id}/label first.",
+    "labeled_count": 0,
+    "total_transactions": number   ← so caller knows predictions exist, just unlabeled
+  }
+
+SCRIPTS — create /scripts/seed_labels.py:
+A demo script that:
+1. Fetches the 100 most recent transactions from the DB
+2. Labels them synthetically:
+   - Any transaction with fraud_score > 0.7 → is_fraud_actual = True, label_source = "synthetic"
+   - All others → is_fraud_actual = False, label_source = "synthetic"
+3. Prints a summary: total labeled, fraud count, non-fraud count
+4. Run with: python scripts/seed_labels.py
+Purpose: instantly populate ground truth for demo/testing without manual work
+
+ALEMBIC MIGRATION:
+Add to transactions table:
+- label_source: String, nullable
+- label_notes: String, nullable  
+- labeled_at: DateTime, nullable (set automatically when is_fraud_actual is updated)
+
+Generate and run the migration. Show the final migration SQL.
+
+Do NOT change the ML models, feature engineering, or scoring logic.
+Do NOT change any existing response formats — only add new fields.
