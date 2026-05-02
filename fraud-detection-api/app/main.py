@@ -83,11 +83,13 @@ from app.api.routes.prediction import router as prediction_router
 from app.api.routes.backtest import router as backtest_router
 from app.api.routes.monitoring import router as monitoring_router
 from app.api.routes.dashboard import router as dashboard_router
+from app.api.routes.transactions import router as transactions_router
 
 app.include_router(prediction_router)
 app.include_router(backtest_router)
 app.include_router(monitoring_router)
 app.include_router(dashboard_router)
+app.include_router(transactions_router)
 
 
 # ── Global exception handlers ─────────────────────────────────────────────────

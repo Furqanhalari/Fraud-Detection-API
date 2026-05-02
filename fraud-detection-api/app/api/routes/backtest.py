@@ -3,6 +3,11 @@ POST /api/v1/backtest         — Threshold sweep evaluation over labelled trans
 GET  /api/v1/backtest/history — Paginated past backtest runs grouped by dataset_label.
 
 Security: POST route requires X-API-Key header.
+
+NOTE: POST /api/v1/backtest requires transactions with is_fraud_actual populated.
+Use POST /api/v1/transactions/{transaction_id}/label (or /bulk-label) to apply
+ground-truth labels before running a backtest. The 400 error response includes
+total_transactions so callers know predictions exist but are unlabeled.
 """
 
 import math
@@ -169,17 +174,22 @@ def run_backtest(req: BacktestRequest, db: Session = Depends(get_db)) -> Backtes
 
     if not rows:
         logger.warning("[backtest] No labelled transactions found for dataset_label=%s", req.dataset_label)
+        # Count total transactions so the caller knows predictions exist but are unlabeled
+        try:
+            total_transactions = db.query(Transaction.id).count()
+        except Exception:
+            total_transactions = 0
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_structured_error(
-                "no_ground_truth",
-                "No transactions with ground-truth labels found.",
-                (
-                    "Backtest requires transactions where is_fraud_actual is set. "
-                    "Update existing transaction rows with ground-truth fraud labels "
-                    "before running a backtest."
+            detail={
+                "error": "no_labeled_data",
+                "message": (
+                    "No transactions with ground truth labels found. "
+                    "Use POST /api/v1/transactions/{id}/label first."
                 ),
-            ),
+                "labeled_count": 0,
+                "total_transactions": total_transactions,
+            },
         )
 
     try:

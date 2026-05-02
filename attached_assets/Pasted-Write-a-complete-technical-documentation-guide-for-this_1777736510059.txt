@@ -1,0 +1,112 @@
+Write a complete technical documentation guide for this codebase written 
+in the style of a senior ML engineer teaching a junior developer.
+
+Tone: Direct, practical, no fluff. Explain WHY decisions were made, 
+not just what the code does. Point out common mistakes juniors make 
+and how this code avoids them.
+
+Structure the document exactly as follows:
+
+---
+
+# E-Commerce Fraud Detection System — Developer Guide
+
+## 1. Project Overview (2 paragraphs)
+What this system does and why it matters in the Pakistani fintech context 
+(Daraz, NayaPay, Finja). Who would use this API and how.
+
+## 2. Architecture Decisions
+For each major decision below, explain: what we chose, what the alternative 
+was, and why we chose this one over the alternative.
+- Why FastAPI over Django/Flask
+- Why XGBoost + Isolation Forest ensemble over a single model
+- Why SQLite for dev (and what to swap for prod)
+- Why we store raw_features as JSON in the transactions table
+- Why model loading happens at startup (lifespan event) not per-request
+
+## 3. The ML Pipeline — Explained Line by Line
+Walk through /app/ml/train.py as if reading it together.
+For every non-obvious line:
+- What it does
+- Why this approach (e.g. "We use RobustScaler not StandardScaler because 
+  fraud amounts are extreme outliers — StandardScaler would distort the 
+  normal distribution")
+- What breaks if you remove it
+
+Cover in detail:
+- Class imbalance handling (scale_pos_weight)
+- Why contamination=0.01 in Isolation Forest
+- How the 0.7/0.3 ensemble weight was chosen
+- What the artifacts/ folder contains and why each file is saved
+
+## 4. Feature Engineering Decisions
+Explain each engineered feature:
+- Why RobustScaler on Amount
+- Why sine/cosine encoding for time (not just raw hour)
+- What features are intentionally excluded and why (data leakage risks)
+Include a "junior mistake to avoid" callout box for data leakage.
+
+## 5. The REST API — Route by Route
+For each route, document:
+- Purpose (one sentence)
+- Request/response schema
+- What happens internally (step by step)
+- What can go wrong and how it's handled
+- One example curl command
+
+Routes to cover:
+POST /api/v1/predict
+POST /api/v1/backtest
+POST /api/v1/monitoring/drift-snapshot
+GET /api/v1/monitoring/drift-history
+
+## 6. Understanding Model Drift
+Explain Population Stability Index (PSI) to a junior dev who has never 
+heard of it:
+- What it measures and why it matters in production
+- The PSI formula, explained in plain English with a concrete example
+- What PSI < 0.1, 0.1–0.2, and > 0.2 means in practice
+- Why we track per-feature PSI, not just overall model accuracy
+- What action a junior dev should take when a feature flags drift
+
+## 7. The Monitoring Dashboard
+Walk through what each panel shows:
+- Live metrics cards: what each number means and how to interpret it
+- Precision/recall curve: how to read it, what the threshold line means,
+  and what "good" vs "concerning" curves look like
+- Drift table: how to read the PSI column and when to retrain
+- Volume chart: what spikes in fraud rate look like vs normal traffic
+
+## 8. How to Retrain the Model
+Step-by-step retraining instructions:
+1. When to retrain (PSI threshold, accuracy drop, new data available)
+2. Exact commands to run
+3. How to register the new version in model_versions table
+4. How to set it as active without downtime
+5. How to compare old vs new model using the backtest framework
+
+## 9. Common Mistakes & How We Avoid Them
+Write this as a list of "I almost made this mistake" stories:
+- Serving the model before it's loaded (race condition at startup)
+- Training on the full dataset including test set (data leakage)
+- Using accuracy as the metric for imbalanced fraud data
+- Forgetting to apply the SAME scaler used during training (at inference)
+- Letting the free tier call the AI API 1000x/day without rate limiting
+
+## 10. How to Run This Locally
+Exact steps from git clone to working API, with expected output at each step.
+Include the curl command to test a prediction end-to-end.
+
+## 11. Glossary
+Define in plain English (no Wikipedia copy-paste):
+XGBoost, Isolation Forest, Ensemble model, PSI, AUC-ROC, Precision, 
+Recall, F1 Score, Class imbalance, Feature engineering, Model drift, 
+Backtest, Contamination parameter
+
+---
+
+Format the output as a single Markdown file.
+Use > blockquotes for "junior mistake" callouts.
+Use code blocks for all code examples and curl commands.
+Write as if you will hand this document to a junior dev on their first day 
+and they need to maintain this system alone.

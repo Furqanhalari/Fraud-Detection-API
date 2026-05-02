@@ -45,6 +45,11 @@ class Transaction(Base):
     is_fraud_actual = Column(Boolean, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
+    # Ground-truth labeling fields (migration: a3f8c2e1d9b4)
+    label_source = Column(String, nullable=True)   # chargeback | investigation | manual | synthetic
+    label_notes = Column(String, nullable=True)    # optional free-text annotation
+    labeled_at = Column(DateTime, nullable=True)   # set automatically when is_fraud_actual is written
+
     __table_args__ = (
         Index("ix_transactions_user_id", "user_id"),
         Index("ix_transactions_created_at", "created_at"),
