@@ -39,6 +39,39 @@ uvicorn app.main:app --reload
 
 Health check: `GET /api/health`
 
+## Training the Models
+
+1. Download the [Kaggle Credit Card Fraud dataset](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) and place it at `data/creditcard.csv`.
+2. Run the training pipeline:
+
+```bash
+cd fraud-detection-api
+python -m app.ml.train
+```
+
+This will:
+- Engineer features (cyclical time encoding, RobustScaler normalization)
+- Train XGBoost (300 estimators, class-imbalance corrected via `scale_pos_weight`)
+- Train Isolation Forest (unsupervised, full dataset)
+- Print a full classification report
+- Save artifacts to `app/ml/artifacts/`:
+  - `scaler.pkl`
+  - `xgboost_model.pkl`
+  - `isolation_forest.pkl`
+  - `metrics.json`
+
+Override the dataset path: `CREDITCARD_CSV=/path/to/file.csv python -m app.ml.train`
+
+## Ensemble Scoring
+
+| Component | Weight | Method |
+|---|---|---|
+| XGBoost | 70% | Supervised fraud probability (0–1) |
+| Isolation Forest | 30% | Anomaly flag converted to 0/1 |
+
+`final_score = 0.7 × xgb_prob + 0.3 × iso_binary`  
+`is_fraud = final_score ≥ FRAUD_THRESHOLD` (default: 0.5)
+
 ## Environment Variables
 
 See `.env.example` for all required variables with descriptions.
