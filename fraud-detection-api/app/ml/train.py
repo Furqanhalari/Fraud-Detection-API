@@ -39,6 +39,7 @@ METRICS_PATH = os.path.join(ARTIFACTS_DIR, "metrics.json")
 
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from app.ml.features import engineer_features, get_feature_names
+from app.monitoring.drift import save_train_distributions
 
 
 def load_data(path: str) -> pd.DataFrame:
@@ -160,6 +161,9 @@ def main() -> None:
     print(f"  XGBoost        → {XGB_PATH}")
     joblib.dump(iso_model, ISO_PATH)
     print(f"  Isolation Forest → {ISO_PATH}")
+
+    print("\n[train] Saving training distributions for drift monitoring …")
+    save_train_distributions(X_train, feature_names)
 
     metrics = {
         "model": "xgboost_v1",
