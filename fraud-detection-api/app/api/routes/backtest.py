@@ -1,6 +1,6 @@
 """
 POST /api/v1/backtest  — Threshold sweep evaluation over labelled transactions.
-GET  /api/v1/backtest/history — All past backtest runs grouped by dataset_label.
+GET  /api/v1/backtest/history — All past backtest_runs rows grouped by dataset_label.
 """
 
 import uuid
@@ -10,21 +10,25 @@ from typing import List, Optional
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
-from sklearn.metrics import (
-    f1_score,
-    precision_score,
-    recall_score,
-)
+from pydantic import BaseModel, Field, model_validator
+from sklearn.metrics import f1_score, precision_score, recall_score
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.logger import get_logger
 from app.models.db_models import BacktestRun, ModelVersion, Transaction
 
+logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["backtest"])
 
 
-# ── Pydantic schemas (local to this module) ──────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _structured_error(error: str, message: str, detail: str = "") -> dict:
+    return {"error": error, "message": message, "detail": detail}
+
+
+# ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class BacktestRequest(BaseModel):
     dataset_label: str
@@ -32,6 +36,15 @@ class BacktestRequest(BaseModel):
         default=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         min_length=1,
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def strip_strings(cls, values):
+        if isinstance(values, dict):
+            for k, v in values.items():
+                if isinstance(v, str):
+                    values[k] = v.strip()
+        return values
 
 
 class ThresholdResult(BaseModel):
@@ -67,24 +80,15 @@ class BacktestHistoryResponse(BaseModel):
     groups: dict[str, List[BacktestRunRecord]]
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _get_or_create_model_version(db: Session) -> str:
-    """
-    Return the id of the active ModelVersion.
-    Falls back to any existing version, then creates a placeholder so the
-    NOT NULL FK on backtest_runs is always satisfied.
-    SQLite does not enforce FK constraints by default, but we satisfy
-    the ORM nullable=False constraint at the Python level.
-    """
     mv = db.query(ModelVersion).filter(ModelVersion.is_active == True).first()
     if mv:
         return str(mv.id)
-
     mv = db.query(ModelVersion).order_by(ModelVersion.created_at.desc()).first()
     if mv:
         return str(mv.id)
-
     placeholder = ModelVersion(
         id=str(uuid.uuid4()),
         version_tag="auto-placeholder",
@@ -104,22 +108,16 @@ def _compute_threshold_metrics(
     fraud_scores: np.ndarray,
     threshold: float,
 ) -> ThresholdResult:
-    """Apply a threshold and return classification metrics."""
     y_pred = (fraud_scores >= threshold).astype(int)
-
     prec = float(precision_score(y_true, y_pred, zero_division=0))
     rec  = float(recall_score(y_true, y_pred, zero_division=0))
     f1   = float(f1_score(y_true, y_pred, zero_division=0))
-
-    # FPR = FP / (FP + TN),  TPR = TP / (TP + FN)
     tp = int(((y_pred == 1) & (y_true == 1)).sum())
     fp = int(((y_pred == 1) & (y_true == 0)).sum())
     tn = int(((y_pred == 0) & (y_true == 0)).sum())
     fn = int(((y_pred == 0) & (y_true == 1)).sum())
-
     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
     tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-
     return ThresholdResult(
         threshold=round(threshold, 4),
         precision=round(prec, 4),
@@ -130,70 +128,136 @@ def _compute_threshold_metrics(
     )
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/backtest",
     response_model=BacktestResponse,
     status_code=status.HTTP_200_OK,
     responses={
-        422: {"description": "Validation error"},
-        404: {"description": "No labelled transactions found"},
+        400: {"model": dict, "description": "No labelled transactions available"},
+        422: {"model": dict, "description": "Validation error"},
+        500: {"model": dict, "description": "Internal error during evaluation"},
     },
 )
 def run_backtest(req: BacktestRequest, db: Session = Depends(get_db)) -> BacktestResponse:
-    # ── 1. Load labelled transactions ──────────────────────────────────────
-    rows = (
-        db.query(Transaction)
-        .filter(Transaction.is_fraud_actual.isnot(None))
-        .filter(Transaction.fraud_score.isnot(None))
-        .all()
-    )
-
-    if not rows:
+    # ── 1. Load labelled transactions ──────────────────────────────────────────
+    try:
+        rows = (
+            db.query(Transaction)
+            .filter(Transaction.is_fraud_actual.isnot(None))
+            .filter(Transaction.fraud_score.isnot(None))
+            .all()
+        )
+    except Exception as exc:
+        logger.error("[backtest] DB query failed: %s", exc, exc_info=True)
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                "No labelled transactions found. "
-                "Populate is_fraud_actual on existing transaction rows first."
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_structured_error(
+                "db_error",
+                "Failed to load transactions from the database.",
+                str(exc),
             ),
         )
 
-    y_true = np.array([int(r.is_fraud_actual) for r in rows])
-    fraud_scores = np.array([float(r.fraud_score) for r in rows])
+    if not rows:
+        logger.warning("[backtest] No labelled transactions found for dataset_label=%s", req.dataset_label)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_structured_error(
+                "no_ground_truth",
+                "No transactions with ground-truth labels found.",
+                (
+                    "Backtest requires transactions where is_fraud_actual is set. "
+                    "Update existing transaction rows with ground-truth fraud labels "
+                    "before running a backtest."
+                ),
+            ),
+        )
 
-    # ── 2. Resolve model version for FK ───────────────────────────────────
-    model_version_id = _get_or_create_model_version(db)
+    try:
+        y_true = np.array([int(r.is_fraud_actual) for r in rows])
+        fraud_scores = np.array([float(r.fraud_score) for r in rows])
+    except Exception as exc:
+        logger.error("[backtest] Label extraction failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_structured_error(
+                "data_error",
+                "Could not extract labels or scores from transaction records.",
+                str(exc),
+            ),
+        )
 
-    # ── 3. Threshold sweep ─────────────────────────────────────────────────
+    # ── 2. Resolve model version ───────────────────────────────────────────────
+    try:
+        model_version_id = _get_or_create_model_version(db)
+    except Exception as exc:
+        logger.error("[backtest] Model version resolution failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_structured_error(
+                "db_error",
+                "Could not resolve or create a model version record.",
+                str(exc),
+            ),
+        )
+
+    # ── 3. Threshold sweep ─────────────────────────────────────────────────────
     thresholds = sorted(set(req.thresholds))
     run_at = datetime.utcnow()
     results: List[ThresholdResult] = []
 
-    for t in thresholds:
-        metrics = _compute_threshold_metrics(y_true, fraud_scores, t)
-        results.append(metrics)
-
-        db.add(
-            BacktestRun(
-                id=str(uuid.uuid4()),
-                model_version_id=model_version_id,
-                threshold=metrics.threshold,
-                precision=metrics.precision,
-                recall=metrics.recall,
-                f1=metrics.f1,
-                false_positive_rate=metrics.false_positive_rate,
-                true_positive_rate=metrics.true_positive_rate,
-                dataset_label=req.dataset_label,
-                run_at=run_at,
-                created_at=run_at,
+    try:
+        for t in thresholds:
+            if not (0.0 <= t <= 1.0):
+                logger.warning("[backtest] Threshold %.2f out of [0,1] range, skipping", t)
+                continue
+            metrics = _compute_threshold_metrics(y_true, fraud_scores, t)
+            results.append(metrics)
+            db.add(
+                BacktestRun(
+                    id=str(uuid.uuid4()),
+                    model_version_id=model_version_id,
+                    threshold=metrics.threshold,
+                    precision=metrics.precision,
+                    recall=metrics.recall,
+                    f1=metrics.f1,
+                    false_positive_rate=metrics.false_positive_rate,
+                    true_positive_rate=metrics.true_positive_rate,
+                    dataset_label=req.dataset_label,
+                    run_at=run_at,
+                    created_at=run_at,
+                )
             )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("[backtest] Threshold sweep failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_structured_error(
+                "evaluation_error",
+                "Error during threshold sweep computation.",
+                str(exc),
+            ),
         )
 
-    db.commit()
+    if not results:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_structured_error(
+                "no_valid_thresholds",
+                "All provided thresholds were out of the valid range [0.0, 1.0].",
+                f"Received: {req.thresholds}",
+            ),
+        )
 
-    # ── 4. Best F1 threshold ───────────────────────────────────────────────
     optimal = max(results, key=lambda r: r.f1)
+    logger.info(
+        "[backtest] label=%s rows=%d thresholds=%d optimal=%.2f f1=%.4f",
+        req.dataset_label, len(rows), len(results), optimal.threshold, optimal.f1,
+    )
 
     return BacktestResponse(
         dataset_label=req.dataset_label,
@@ -206,14 +270,28 @@ def run_backtest(req: BacktestRequest, db: Session = Depends(get_db)) -> Backtes
     "/backtest/history",
     response_model=BacktestHistoryResponse,
     status_code=status.HTTP_200_OK,
+    responses={
+        500: {"model": dict, "description": "Database error"},
+    },
 )
 def backtest_history(db: Session = Depends(get_db)) -> BacktestHistoryResponse:
     """Return all past backtest_runs rows grouped by dataset_label."""
-    rows = (
-        db.query(BacktestRun)
-        .order_by(BacktestRun.dataset_label, BacktestRun.run_at, BacktestRun.threshold)
-        .all()
-    )
+    try:
+        rows = (
+            db.query(BacktestRun)
+            .order_by(BacktestRun.dataset_label, BacktestRun.run_at, BacktestRun.threshold)
+            .all()
+        )
+    except Exception as exc:
+        logger.error("[backtest_history] DB query failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_structured_error(
+                "db_error",
+                "Failed to load backtest history from the database.",
+                str(exc),
+            ),
+        )
 
     groups: dict[str, List[BacktestRunRecord]] = defaultdict(list)
     for r in rows:
