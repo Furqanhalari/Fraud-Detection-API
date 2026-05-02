@@ -1,8 +1,11 @@
 """
 POST /api/v1/backtest         — Threshold sweep evaluation over labelled transactions.
 GET  /api/v1/backtest/history — Paginated past backtest runs grouped by dataset_label.
+
+Security: POST route requires X-API-Key header.
 """
 
+import math
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -16,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.logger import get_logger
+from app.core.security import require_api_key
 from app.models.db_models import BacktestRun, ModelVersion, Transaction
 
 logger = get_logger(__name__)
@@ -31,10 +35,11 @@ def _structured_error(error: str, message: str, detail: str = "") -> dict:
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class BacktestRequest(BaseModel):
-    dataset_label: str
+    dataset_label: str = Field(..., max_length=128)
     thresholds: List[float] = Field(
         default=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         min_length=1,
+        max_length=50,
     )
 
     @model_validator(mode="before")
@@ -138,14 +143,16 @@ def _compute_threshold_metrics(
     "/backtest",
     response_model=BacktestResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_api_key)],
     responses={
         400: {"model": dict, "description": "No labelled transactions available"},
+        401: {"model": dict, "description": "Missing or invalid API key"},
         422: {"model": dict, "description": "Validation error"},
         500: {"model": dict, "description": "Internal error during evaluation"},
     },
 )
 def run_backtest(req: BacktestRequest, db: Session = Depends(get_db)) -> BacktestResponse:
-    # ── 1. Load labelled transactions (select only needed columns) ─────────────
+    # ── 1. Load labelled transactions (explicit column selection) ──────────────
     try:
         rows = (
             db.query(Transaction.is_fraud_actual, Transaction.fraud_score)
@@ -272,10 +279,9 @@ def backtest_history(
     page_size: int = Query(default=50, ge=1, le=200, description="Records per page (max 200)"),
     db: Session = Depends(get_db),
 ) -> BacktestHistoryResponse:
-    """Return past backtest_runs rows grouped by dataset_label, paginated."""
+    """Return past backtest_runs rows grouped by dataset_label, paginated. No API key required."""
     try:
         total = db.query(BacktestRun.id).count()
-
         rows = (
             db.query(
                 BacktestRun.id,
@@ -302,7 +308,6 @@ def backtest_history(
             detail=_structured_error("db_error", "Failed to load backtest history from the database.", str(exc)),
         )
 
-    import math
     total_pages = math.ceil(total / page_size) if total > 0 else 1
 
     groups: dict[str, List[BacktestRunRecord]] = defaultdict(list)

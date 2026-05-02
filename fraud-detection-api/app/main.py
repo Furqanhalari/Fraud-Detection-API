@@ -3,17 +3,23 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from app.core.config import settings
 from app.core.limiter import limiter
 from app.core.logger import get_logger
+from app.core.security import install_ip_mask_filter
 from app.ml.ensemble import FraudEnsemble
 
 logger = get_logger(__name__)
+
+# Install IP-masking log filter before any log output
+install_ip_mask_filter()
 
 
 # ── Lifespan: load models ONCE at startup ─────────────────────────────────────
@@ -40,8 +46,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Fraud Detection API", version="0.1.0", lifespan=lifespan)
 
-# Set safe defaults — lifespan overwrites these after startup completes
+# Set safe defaults — lifespan overwrites ensemble after startup completes
 app.state.ensemble = None
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# Configurable via ALLOWED_ORIGINS env var (comma-separated).
+# Defaults to localhost dev ports; override in production with real domain(s).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins,
+    allow_credentials=False,          # no cookies / credentials across origins
+    allow_methods=["GET", "POST"],    # only the verbs this API uses
+    allow_headers=["Content-Type", "X-API-Key"],
+)
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -77,7 +96,10 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+    logger.error(
+        "Unhandled exception on %s %s: %s",
+        request.method, request.url.path, exc, exc_info=True,
+    )
     return JSONResponse(
         status_code=500,
         content={
@@ -88,7 +110,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
-# ── Health ────────────────────────────────────────────────────────────────────
+# ── Health (no API key required — public) ─────────────────────────────────────
 
 @app.get("/api/health")
 def health(request: Request):

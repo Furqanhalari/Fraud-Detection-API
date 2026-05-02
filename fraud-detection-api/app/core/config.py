@@ -8,6 +8,17 @@ class Settings:
     fraud_threshold: float = float(os.getenv("FRAUD_THRESHOLD", "0.5"))
     anomaly_contamination: float = float(os.getenv("ANOMALY_CONTAMINATION", "0.01"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    api_key: str = os.getenv("API_KEY", "")
+
+    # CORS — comma-separated origins; defaults to localhost dev ports
+    allowed_origins: list[str] = [
+        o.strip()
+        for o in os.getenv(
+            "ALLOWED_ORIGINS",
+            "http://localhost:3000,http://localhost:8000,http://localhost:5173,http://127.0.0.1:8000",
+        ).split(",")
+        if o.strip()
+    ]
 
 
 @lru_cache

@@ -1,22 +1,28 @@
 """
 POST /api/v1/predict — Real-time fraud prediction endpoint.
 
+Security:
+  - X-API-Key header required (require_api_key dependency)
+  - Rate limited: 100 req/min per IP
+  - ip_address stored in DB but never returned in response
+  - No feature vectors logged
+
 Pipeline:
-  1. Rate-limit check (100 req/min per IP via SlowAPIMiddleware)
-  2. Validate & sanitize input (Pydantic + model_validator)
-  3. Check models are loaded (503 if startup failed)
-  4. Duplicate transaction_id check (409)
-  5. Feature engineering
-  6. Ensemble inference via request.app.state.ensemble (loaded at startup)
-  7. Persist to DB
-  8. Return structured response
+  1. API key validation
+  2. Rate-limit check (100 req/min per IP)
+  3. Validate & sanitize input (Pydantic strict types + model_validator)
+  4. Check models are loaded (503 if startup failed)
+  5. Duplicate transaction_id check (409)
+  6. Feature engineering
+  7. Ensemble inference via request.app.state.ensemble (loaded at startup)
+  8. Persist to DB
+  9. Return structured response (ip_address excluded)
 """
 
 import time
 import uuid
 from datetime import datetime
 
-import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -25,6 +31,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.limiter import limiter
 from app.core.logger import get_logger
+from app.core.security import require_api_key
 from app.ml.features import engineer_features
 from app.models.db_models import Transaction
 from app.models.schemas import PredictRequest, PredictResponse
@@ -57,7 +64,9 @@ def _build_feature_row(req: PredictRequest) -> pd.DataFrame:
     "/predict",
     response_model=PredictResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_api_key)],
     responses={
+        401: {"model": dict, "description": "Missing or invalid API key"},
         409: {"model": dict, "description": "Duplicate transaction_id"},
         422: {"model": dict, "description": "Validation / feature error"},
         429: {"model": dict, "description": "Rate limit exceeded"},
@@ -161,11 +170,14 @@ def predict(request: Request, req: PredictRequest, db: Session = Depends(get_db)
     processing_ms = int((time.monotonic() - t_start) * 1000)
 
     # ── 4. Persist to DB ──────────────────────────────────────────────────────
+    # NOTE: feature_vector is stored in raw_features for drift monitoring
+    # but is NOT logged (avoid leaking model internals to log files).
     raw_features_snapshot = {
         "amount": req.amount,
         "merchant_category": req.merchant_category,
         "hour_of_day": req.hour_of_day,
         "day_of_week": req.day_of_week,
+        # ip_address stored for internal audit only — never returned in responses
         "ip_address": req.ip_address,
         "device_fingerprint": req.device_fingerprint,
         "feature_vector": feature_vector.tolist(),
@@ -202,11 +214,16 @@ def predict(request: Request, req: PredictRequest, db: Session = Depends(get_db)
             ),
         )
 
+    # Log outcome WITHOUT feature vector or ip_address
     logger.info(
         "[predict] txn=%s fraud_score=%.4f is_fraud=%s ms=%d",
-        req.transaction_id, result["fraud_score"], result["is_fraud"], processing_ms,
+        req.transaction_id,
+        result["fraud_score"],
+        result["is_fraud"],
+        processing_ms,
     )
 
+    # PredictResponse schema excludes ip_address by design
     return PredictResponse(
         transaction_id=req.transaction_id,
         fraud_score=result["fraud_score"],

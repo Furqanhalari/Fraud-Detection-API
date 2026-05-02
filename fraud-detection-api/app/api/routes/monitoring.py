@@ -1,5 +1,5 @@
 """
-POST /api/v1/monitoring/drift-snapshot  — Trigger a drift snapshot for the active model.
+POST /api/v1/monitoring/drift-snapshot  — Trigger a drift snapshot (API key required).
 GET  /api/v1/monitoring/drift-history   — PSI history grouped by feature.
 GET  /api/v1/monitoring/summary         — Live today metrics for the dashboard.
 GET  /api/v1/monitoring/volume          — Hourly transaction counts (last 24 h).
@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.core.security import require_api_key
 from app.models.db_models import DriftSnapshot, ModelVersion, Transaction
 from app.monitoring.drift import run_drift_snapshot
 
@@ -92,16 +93,15 @@ class VolumeResponse(BaseModel):
     "/drift-snapshot",
     response_model=DriftSnapshotResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_api_key)],
     responses={
+        401: {"model": dict, "description": "Missing or invalid API key"},
         503: {"model": dict, "description": "Model or training distributions not ready"},
         500: {"model": dict, "description": "Drift computation error"},
     },
 )
 def trigger_drift_snapshot(db: Session = Depends(get_db)) -> DriftSnapshotResponse:
-    """
-    Compute PSI for every feature against the training distribution,
-    persist one drift_snapshots row per feature, and return the summary.
-    """
+    """Compute PSI for every feature, persist one snapshot row per feature."""
     model_version_id = _resolve_active_model_version(db)
 
     try:
@@ -147,7 +147,7 @@ def drift_history(
     days: int = Query(default=30, ge=1, le=365, description="Look-back window in days"),
     db: Session = Depends(get_db),
 ) -> DriftHistoryResponse:
-    """Return drift_snapshots rows for the last N days, grouped by feature_name."""
+    """Return drift_snapshots for the last N days, grouped by feature_name."""
     response.headers["Cache-Control"] = _CACHE_HEADER
 
     try:
@@ -200,7 +200,6 @@ def summary(response: Response, db: Session = Depends(get_db)) -> SummaryRespons
 
     try:
         today_start = datetime.combine(datetime.utcnow().date(), dt_time.min)
-        # Select only the columns we actually aggregate — avoids loading raw_features JSON
         rows = (
             db.query(
                 Transaction.is_fraud_predicted,
@@ -249,7 +248,6 @@ def volume(response: Response, db: Session = Depends(get_db)) -> VolumeResponse:
 
     try:
         cutoff = datetime.utcnow() - timedelta(hours=24)
-        # Select only the two columns needed — avoids loading raw_features JSON
         rows = (
             db.query(Transaction.created_at, Transaction.is_fraud_predicted)
             .filter(Transaction.created_at >= cutoff)
