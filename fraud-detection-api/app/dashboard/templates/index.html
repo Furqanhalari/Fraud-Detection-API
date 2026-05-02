@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Fraud Detection — Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:      #0f1117;
+    --surface: #1a1d27;
+    --border:  #2a2d3a;
+    --blue:    #378ADD;
+    --coral:   #D85A30;
+    --green:   #22c55e;
+    --yellow:  #f59e0b;
+    --red:     #ef4444;
+    --muted:   #6b7280;
+    --text:    #e2e8f0;
+    --subtext: #94a3b8;
+    --radius:  10px;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+  }
+  header h1 span { color: var(--blue); }
+  .header-meta {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    font-size: 12px;
+    color: var(--subtext);
+  }
+  .live-dot {
+    width: 8px; height: 8px;
+    background: var(--green);
+    border-radius: 50%;
+    display: inline-block;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: .3; }
+  }
+  #last-updated { font-variant-numeric: tabular-nums; }
+
+  /* ── Layout ── */
+  main {
+    padding: 24px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  /* ── Metric cards ── */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+  }
+  @media (max-width: 900px) { .cards { grid-template-columns: repeat(2, 1fr); } }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 22px;
+  }
+  .card-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .6px;
+    text-transform: uppercase;
+    color: var(--subtext);
+    margin-bottom: 10px;
+  }
+  .card-value {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -1px;
+    color: var(--text);
+    line-height: 1;
+  }
+  .card-value.highlight { color: var(--blue); }
+  .card-sub {
+    font-size: 12px;
+    color: var(--subtext);
+    margin-top: 6px;
+  }
+
+  /* ── Chart panels ── */
+  .charts-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 900px) { .charts-row { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+  }
+  .panel-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .panel-sub {
+    font-size: 11px;
+    color: var(--subtext);
+    margin-bottom: 18px;
+  }
+  .chart-wrap {
+    position: relative;
+    height: 240px;
+  }
+
+  /* ── Drift table ── */
+  .table-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+  }
+  .table-panel .panel-title { margin-bottom: 4px; }
+  .table-panel .panel-sub   { margin-bottom: 18px; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .5px;
+    text-transform: uppercase;
+    color: var(--subtext);
+    padding: 0 12px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 99px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-stable { background: rgba(34,197,94,.15);  color: var(--green);  }
+  .badge-watch  { background: rgba(245,158,11,.15); color: var(--yellow); }
+  .badge-drift  { background: rgba(239,68,68,.15);  color: var(--red);    }
+
+  .sparkline-cell { width: 90px; }
+
+  /* ── Loading / empty ── */
+  .loading {
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+    padding: 20px;
+  }
+  .no-data {
+    color: var(--muted);
+    font-size: 12px;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Fraud <span>Monitor</span></h1>
+  <div class="header-meta">
+    <span><span class="live-dot"></span>&nbsp;Live</span>
+    <span>Updated <span id="last-updated">—</span></span>
+    <span style="color:var(--blue);cursor:pointer" onclick="refresh()">↻ Refresh</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- Panel 1: Live metric cards -->
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Transactions Today</div>
+      <div class="card-value" id="m-total">—</div>
+      <div class="card-sub">since midnight UTC</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Fraud Rate Today</div>
+      <div class="card-value" id="m-fraud-rate">—</div>
+      <div class="card-sub">of scored transactions</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Avg Fraud Score</div>
+      <div class="card-value" id="m-avg-score">—</div>
+      <div class="card-sub">ensemble output (0–1)</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Active Model</div>
+      <div class="card-value highlight" id="m-model" style="font-size:20px;line-height:1.4">—</div>
+      <div class="card-sub" id="m-threshold">threshold —</div>
+    </div>
+  </div>
+
+  <!-- Panel 2 + 4: Charts row -->
+  <div class="charts-row">
+
+    <!-- Panel 2: Precision / Recall -->
+    <div class="panel">
+      <div class="panel-title">Precision &amp; Recall vs Threshold</div>
+      <div class="panel-sub">Latest backtest run — active threshold shown as dashed line</div>
+      <div class="chart-wrap">
+        <canvas id="pr-chart"></canvas>
+      </div>
+    </div>
+
+    <!-- Panel 4: Transaction volume -->
+    <div class="panel">
+      <div class="panel-title">Transaction Volume — Last 24 Hours</div>
+      <div class="panel-sub">Fraud vs legitimate, by hour (UTC)</div>
+      <div class="chart-wrap">
+        <canvas id="vol-chart"></canvas>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Panel 3: Feature drift table -->
+  <div class="table-panel">
+    <div class="panel-title">Feature Drift Monitor</div>
+    <div class="panel-sub">PSI over last 7 days — flags drift when PSI &gt; 0.2</div>
+    <div id="drift-table-wrap">
+      <div class="loading">Loading drift data…</div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ── Chart.js global defaults ──────────────────────────────────────────────
+Chart.defaults.color = '#94a3b8';
+Chart.defaults.borderColor = '#2a2d3a';
+Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+Chart.defaults.font.size = 11;
+
+const BLUE  = '#378ADD';
+const CORAL = '#D85A30';
+const RED   = 'rgba(239,68,68,0.75)';
+const GRAY  = 'rgba(107,114,128,0.55)';
+
+let prChart  = null;
+let volChart = null;
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+function fmt(n, decimals = 1) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  return Number(n).toFixed(decimals);
+}
+
+function fmtTime() {
+  return new Date().toLocaleTimeString('en-US', { hour12: false });
+}
+
+function sparklineSVG(values) {
+  if (!values || values.length === 0) return '<span class="no-data">—</span>';
+  const w = 80, h = 22;
+  const max = Math.max(...values, 0.001);
+  const pts = values.map((v, i) => {
+    const x = values.length === 1 ? w / 2 : (i / (values.length - 1)) * w;
+    const y = h - 2 - ((v / max) * (h - 4));
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const last = values[values.length - 1];
+  const stroke = last > 0.2 ? '#ef4444' : last > 0.1 ? '#f59e0b' : '#22c55e';
+  return `<svg width="${w}" height="${h}" style="vertical-align:middle">
+    <polyline points="${pts}" fill="none" stroke="${stroke}" stroke-width="1.5" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+function statusBadge(psi) {
+  if (psi > 0.2)  return `<span class="badge badge-drift">Drift</span>`;
+  if (psi > 0.1)  return `<span class="badge badge-watch">Watch</span>`;
+  return `<span class="badge badge-stable">Stable</span>`;
+}
+
+// ── API fetches ───────────────────────────────────────────────────────────
+
+async function fetchJSON(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+// ── Panel 1: Summary cards ────────────────────────────────────────────────
+
+async function loadSummary() {
+  const data = await fetchJSON('/api/v1/monitoring/summary');
+  if (!data) return;
+  document.getElementById('m-total').textContent     = data.total_transactions_today ?? '0';
+  document.getElementById('m-fraud-rate').textContent = fmt(data.fraud_rate_today, 2) + '%';
+  document.getElementById('m-avg-score').textContent  = fmt(data.avg_fraud_score_today, 4);
+  document.getElementById('m-model').textContent      = data.active_model_version || 'None';
+  document.getElementById('m-threshold').textContent  = 'threshold ' + fmt(data.threshold_used, 2);
+}
+
+// ── Panel 2: Precision / Recall chart ────────────────────────────────────
+
+async function loadPRChart() {
+  const data = await fetchJSON('/api/v1/backtest/history');
+  const summaryData = await fetchJSON('/api/v1/monitoring/summary');
+  const activeThreshold = summaryData?.threshold_used ?? 0.5;
+
+  const canvas = document.getElementById('pr-chart');
+  const ctx = canvas.getContext('2d');
+
+  // Flatten all backtest records and find latest run_at
+  let allRows = [];
+  if (data?.groups) {
+    for (const rows of Object.values(data.groups)) allRows = allRows.concat(rows);
+  }
+
+  if (!allRows.length) {
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#6b7280';
+    ctx.textAlign = 'center';
+    ctx.fillText('No backtest data yet — run POST /api/v1/backtest', canvas.width / 2, 120);
+    return;
+  }
+
+  // Pick the most recent run_at group
+  allRows.sort((a, b) => new Date(b.run_at ?? b.created_at) - new Date(a.run_at ?? a.created_at));
+  const latestRunAt = allRows[0].run_at ?? allRows[0].created_at;
+  const latestRows = allRows
+    .filter(r => (r.run_at ?? r.created_at) === latestRunAt)
+    .sort((a, b) => a.threshold - b.threshold);
+
+  const thresholds = latestRows.map(r => r.threshold);
+  const precisions = latestRows.map(r => r.precision);
+  const recalls    = latestRows.map(r => r.recall);
+
+  if (prChart) prChart.destroy();
+
+  // Vertical annotation line for active threshold
+  const thresholdPlugin = {
+    id: 'thresholdLine',
+    afterDraw(chart) {
+      const { ctx, scales: { x, y } } = chart;
+      const idx = thresholds.findIndex(t => Math.abs(t - activeThreshold) < 0.001);
+      if (idx < 0) return;
+      const xPos = x.getPixelForValue(idx);
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(xPos, y.top);
+      ctx.lineTo(xPos, y.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.font = '10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('active', xPos, y.top - 4);
+      ctx.restore();
+    }
+  };
+
+  prChart = new Chart(ctx, {
+    type: 'line',
+    plugins: [thresholdPlugin],
+    data: {
+      labels: thresholds.map(t => t.toFixed(2)),
+      datasets: [
+        {
+          label: 'Precision',
+          data: precisions,
+          borderColor: BLUE,
+          backgroundColor: 'rgba(55,138,221,0.08)',
+          pointBackgroundColor: BLUE,
+          tension: 0.35,
+          fill: false,
+          pointRadius: 4,
+        },
+        {
+          label: 'Recall',
+          data: recalls,
+          borderColor: CORAL,
+          backgroundColor: 'rgba(216,90,48,0.08)',
+          pointBackgroundColor: CORAL,
+          tension: 0.35,
+          fill: false,
+          pointRadius: 4,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 400 },
+      scales: {
+        x: { grid: { color: '#1f2233' }, title: { display: true, text: 'Threshold', color: '#6b7280' } },
+        y: { min: 0, max: 1, grid: { color: '#1f2233' }, title: { display: true, text: 'Score', color: '#6b7280' } },
+      },
+      plugins: {
+        legend: { labels: { usePointStyle: true, pointStyle: 'circle', padding: 16 } },
+        tooltip: { mode: 'index', intersect: false },
+      },
+    },
+  });
+}
+
+// ── Panel 4: Volume chart ─────────────────────────────────────────────────
+
+async function loadVolumeChart() {
+  const data = await fetchJSON('/api/v1/monitoring/volume');
+  const ctx = document.getElementById('vol-chart').getContext('2d');
+
+  if (!data) return;
+
+  const labels       = data.hours.map(h => String(h).padStart(2,'0') + ':00');
+  const fraudCounts  = data.fraud_counts;
+  const legitCounts  = data.legit_counts;
+
+  if (volChart) volChart.destroy();
+
+  volChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Fraud',      data: fraudCounts,  backgroundColor: RED,  stack: 'vol' },
+        { label: 'Legitimate', data: legitCounts,  backgroundColor: GRAY, stack: 'vol' },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 400 },
+      scales: {
+        x: {
+          stacked: true,
+          grid: { display: false },
+          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 },
+        },
+        y: {
+          stacked: true,
+          grid: { color: '#1f2233' },
+          ticks: { precision: 0 },
+        },
+      },
+      plugins: {
+        legend: { labels: { usePointStyle: true, pointStyle: 'rect', padding: 16 } },
+        tooltip: { mode: 'index', intersect: false },
+      },
+    },
+  });
+}
+
+// ── Panel 3: Drift table ──────────────────────────────────────────────────
+
+async function loadDriftTable() {
+  const wrap = document.getElementById('drift-table-wrap');
+  const data = await fetchJSON('/api/v1/monitoring/drift-history?days=7');
+
+  if (!data || !data.features || data.features.length === 0) {
+    wrap.innerHTML = '<div class="loading">No drift snapshots yet — run POST /api/v1/monitoring/drift-snapshot</div>';
+    return;
+  }
+
+  const features = data.features;
+
+  const rows = features.map(f => {
+    const latestPSI = f.psi_scores.length ? f.psi_scores[f.psi_scores.length - 1] : 0;
+    return `<tr>
+      <td style="font-family:monospace;font-size:12px">${f.feature_name}</td>
+      <td style="font-variant-numeric:tabular-nums">${fmt(latestPSI, 4)}</td>
+      <td class="sparkline-cell">${sparklineSVG(f.psi_scores)}</td>
+      <td>${statusBadge(latestPSI)}</td>
+    </tr>`;
+  }).join('');
+
+  wrap.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>Latest PSI</th>
+          <th>7-day Trend</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// ── Orchestrate ───────────────────────────────────────────────────────────
+
+async function refresh() {
+  await Promise.all([
+    loadSummary(),
+    loadPRChart(),
+    loadVolumeChart(),
+    loadDriftTable(),
+  ]);
+  document.getElementById('last-updated').textContent = fmtTime();
+}
+
+// Initial load + auto-refresh every 30 s
+refresh();
+setInterval(refresh, 30_000);
+</script>
+</body>
+</html>

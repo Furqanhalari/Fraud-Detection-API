@@ -1,18 +1,22 @@
 """
 POST /api/v1/monitoring/drift-snapshot  — Trigger a drift snapshot for the active model.
-GET  /api/v1/monitoring/drift-history   — Retrieve PSI history grouped by feature.
+GET  /api/v1/monitoring/drift-history   — PSI history grouped by feature.
+GET  /api/v1/monitoring/summary         — Live today metrics for the dashboard.
+GET  /api/v1/monitoring/volume          — Hourly transaction counts (last 24 h).
 """
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date, time as dt_time
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.db_models import DriftSnapshot, ModelVersion
+from app.core.config import settings
+from app.models.db_models import DriftSnapshot, ModelVersion, Transaction
 from app.monitoring.drift import run_drift_snapshot
 
 router = APIRouter(prefix="/api/v1/monitoring", tags=["monitoring"])
@@ -137,3 +141,80 @@ def drift_history(
         )
 
     return DriftHistoryResponse(days=days, features=features)
+
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+class SummaryResponse(BaseModel):
+    total_transactions_today: int
+    fraud_rate_today: float
+    avg_fraud_score_today: float
+    active_model_version: str
+    threshold_used: float
+
+
+@router.get("/summary", response_model=SummaryResponse)
+def summary(db: Session = Depends(get_db)) -> SummaryResponse:
+    """Live today metrics for the dashboard cards."""
+    today_start = datetime.combine(datetime.utcnow().date(), dt_time.min)
+
+    today_txns = (
+        db.query(Transaction)
+        .filter(Transaction.created_at >= today_start)
+        .all()
+    )
+
+    total = len(today_txns)
+    fraud_count = sum(1 for t in today_txns if t.is_fraud_predicted)
+    fraud_rate = (fraud_count / total * 100) if total > 0 else 0.0
+    avg_score = (
+        sum(t.fraud_score or 0.0 for t in today_txns) / total if total > 0 else 0.0
+    )
+
+    mv = db.query(ModelVersion).filter(ModelVersion.is_active == True).first()
+    version_tag = mv.version_tag if mv else "none"
+
+    return SummaryResponse(
+        total_transactions_today=total,
+        fraud_rate_today=round(fraud_rate, 2),
+        avg_fraud_score_today=round(avg_score, 4),
+        active_model_version=version_tag,
+        threshold_used=settings.fraud_threshold,
+    )
+
+
+# ── Volume ────────────────────────────────────────────────────────────────────
+
+class VolumeResponse(BaseModel):
+    hours: List[int]
+    fraud_counts: List[int]
+    legit_counts: List[int]
+
+
+@router.get("/volume", response_model=VolumeResponse)
+def volume(db: Session = Depends(get_db)) -> VolumeResponse:
+    """Hourly transaction counts (fraud vs legit) for the last 24 hours."""
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+
+    rows = (
+        db.query(Transaction)
+        .filter(Transaction.created_at >= cutoff)
+        .all()
+    )
+
+    fraud_by_hour: dict[int, int] = defaultdict(int)
+    legit_by_hour: dict[int, int] = defaultdict(int)
+
+    for t in rows:
+        h = t.created_at.hour
+        if t.is_fraud_predicted:
+            fraud_by_hour[h] += 1
+        else:
+            legit_by_hour[h] += 1
+
+    hours = list(range(24))
+    return VolumeResponse(
+        hours=hours,
+        fraud_counts=[fraud_by_hour[h] for h in hours],
+        legit_counts=[legit_by_hour[h] for h in hours],
+    )
